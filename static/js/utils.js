@@ -338,7 +338,6 @@ const statusMap = {
     account: {
         active: { text: '活跃', class: 'active' },
         expired: { text: '过期', class: 'expired' },
-        banned: { text: '封禁', class: 'banned' },
         failed: { text: '失败', class: 'failed' }
     },
     task: {
@@ -374,7 +373,6 @@ function getServiceTypeText(type) {
 const accountStatusIconMap = {
     active:  { icon: '🟢', title: '正常', bg: 'var(--success-color)' },
     expired: { icon: '🟡', title: '过期', bg: 'var(--warning-color)' },
-    banned:  { icon: '🔴', title: '封禁', bg: '#343a40' },
     failed:  { icon: '❌', title: '失败', bg: '#dc3545' },
 };
 

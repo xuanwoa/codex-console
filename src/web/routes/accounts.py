@@ -123,7 +123,10 @@ def resolve_account_ids(
         return ids
     query = db.query(Account.id)
     if status_filter:
-        query = query.filter(Account.status == status_filter)
+        if status_filter == "failed":
+            query = query.filter(Account.status.in_(["failed", "banned"]))
+        else:
+            query = query.filter(Account.status == status_filter)
     if email_service_filter:
         query = query.filter(Account.email_service == email_service_filter)
     if search_filter:
@@ -147,7 +150,7 @@ def account_to_response(account: Account) -> AccountResponse:
         registered_at=account.registered_at.isoformat() if account.registered_at else None,
         last_refresh=account.last_refresh.isoformat() if account.last_refresh else None,
         expires_at=account.expires_at.isoformat() if account.expires_at else None,
-        status=account.status,
+        status="failed" if account.status == "banned" else account.status,
         proxy_used=account.proxy_used,
         cpa_uploaded=account.cpa_uploaded or False,
         cpa_uploaded_at=account.cpa_uploaded_at.isoformat() if account.cpa_uploaded_at else None,
@@ -179,7 +182,10 @@ async def list_accounts(
 
         # 状态筛选
         if status:
-            query = query.filter(Account.status == status)
+            if status == "failed":
+                query = query.filter(Account.status.in_(["failed", "banned"]))
+            else:
+                query = query.filter(Account.status == status)
 
         # 邮箱服务筛选
         if email_service:
@@ -603,7 +609,7 @@ async def import_accounts_json(request: BatchImportRequest):
 
                 status = 'active'
                 if str(acc_data.get("disabled", "")).lower() == 'true' or acc_data.get("disabled") is True:
-                    status = 'banned'
+                    status = 'failed'
 
                 email_service = acc_data.get("type", "")
                 if email_service and email_service.lower() == "codex":
@@ -670,6 +676,11 @@ async def get_accounts_stats():
             func.count(Account.id)
         ).group_by(Account.status).all()
 
+        by_status = {}
+        for st, count in status_stats:
+            display_st = "failed" if st == "banned" else st
+            by_status[display_st] = by_status.get(display_st, 0) + count
+
         # 按邮箱服务统计
         service_stats = db.query(
             Account.email_service,
@@ -678,7 +689,7 @@ async def get_accounts_stats():
 
         return {
             "total": total,
-            "by_status": {status: count for status, count in status_stats},
+            "by_status": by_status,
             "by_email_service": {service: count for service, count in service_stats}
         }
 

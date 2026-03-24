@@ -316,7 +316,7 @@ def refresh_account_token(account_id: int, proxy_url: Optional[str] = None) -> T
             if result.error_message and ("未找到 access_token" in result.error_message or "Account deactivated" in result.error_message):
                 status = "expired"
             elif result.error_message and ("403" in result.error_message or "401" in result.error_message):
-                status = "banned"
+                status = "failed"
             with db_write_lock:
                 crud.update_account(db, account_id, status=status)
 
@@ -353,8 +353,8 @@ def validate_account_token(account_id: int, proxy_url: Optional[str] = None) -> 
                 status = "failed"
                 if error == "Token 无效或已过期":
                     status = "expired"
-                elif error == "账号可能被封禁":
-                    status = "banned"
+                elif error == "账号可能被封禁" or "failed" in error:
+                    status = "failed"
                 crud.update_account(db, account_id, status=status)
 
         return is_valid, error
