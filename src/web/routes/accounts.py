@@ -7,6 +7,8 @@ import logging
 import zipfile
 from datetime import datetime
 from typing import List, Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Body
 from fastapi.responses import StreamingResponse
@@ -26,7 +28,16 @@ from ...database.models import Account
 from ...database.session import get_db
 
 logger = logging.getLogger(__name__)
+
+cancel_batch_flag = threading.Event()
+
 router = APIRouter()
+
+@router.post("/batch-cancel")
+async def cancel_batch_operation():
+    """终止当前的批量操作"""
+    cancel_batch_flag.set()
+    return {"success": True, "message": "已下发终止指令，正在停止..."}
 
 
 def _get_proxy(request_proxy: Optional[str] = None) -> Optional[str]:
@@ -154,12 +165,13 @@ async def list_accounts(
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     status: Optional[str] = Query(None, description="状态筛选"),
     email_service: Optional[str] = Query(None, description="邮箱服务筛选"),
+    source: Optional[str] = Query(None, description="来源筛选"),
     search: Optional[str] = Query(None, description="搜索关键词"),
 ):
     """
     获取账号列表
 
-    支持分页、状态筛选、邮箱服务筛选和搜索
+    支持分页、状态筛选、邮箱服务筛选、来源筛选和搜索
     """
     with get_db() as db:
         # 构建查询
@@ -172,6 +184,10 @@ async def list_accounts(
         # 邮箱服务筛选
         if email_service:
             query = query.filter(Account.email_service == email_service)
+
+        # 来源筛选
+        if source:
+            query = query.filter(Account.source == source)
 
         # 搜索
         if search:
@@ -537,6 +553,108 @@ async def export_accounts_cpa(request: BatchExportRequest):
         )
 
 
+class BatchImportRequest(BaseModel):
+    """批量导入请求"""
+    accounts: List[dict]
+
+
+@router.post("/import/json")
+async def import_accounts_json(request: BatchImportRequest):
+    """批量导入 JSON 账号数据"""
+    imported_count = 0
+    updated_count = 0
+    errors = []
+
+    with get_db() as db:
+        for index, acc_data in enumerate(request.accounts):
+            try:
+                email = acc_data.get("email")
+                if not email:
+                    errors.append(f"第 {index+1} 条数据缺少 email 字段")
+                    continue
+
+                access_token = acc_data.get("access_token")
+                refresh_token = acc_data.get("refresh_token")
+                id_token = acc_data.get("id_token")
+                account_id = acc_data.get("account_id")
+                
+                # Parse expired time
+                expires_at = None
+                expired_str = acc_data.get("expired") or acc_data.get("expires_at")
+                if expired_str:
+                    if isinstance(expired_str, (int, float)):
+                        expires_at = datetime.fromtimestamp(expired_str)
+                    elif isinstance(expired_str, str):
+                        try:
+                            # format like "2026-04-01T11:29:37Z"
+                            expires_at = datetime.fromisoformat(expired_str.replace("Z", "+00:00"))
+                        except Exception:
+                            pass
+                
+                # Parse last_refresh time
+                last_refresh = None
+                refresh_str = acc_data.get("last_refresh")
+                if refresh_str:
+                    if isinstance(refresh_str, str):
+                        try:
+                            last_refresh = datetime.fromisoformat(refresh_str.replace("Z", "+00:00"))
+                        except Exception:
+                            pass
+
+                status = 'active'
+                if str(acc_data.get("disabled", "")).lower() == 'true' or acc_data.get("disabled") is True:
+                    status = 'banned'
+
+                email_service = acc_data.get("type", "")
+                if email_service and email_service.lower() == "codex":
+                    email_service = ""
+
+                existing_account = crud.get_account_by_email(db, email)
+                if existing_account:
+                    # Update tokens explicitly
+                    update_data = {
+                        "access_token": access_token or existing_account.access_token,
+                        "refresh_token": refresh_token or existing_account.refresh_token,
+                        "id_token": id_token or existing_account.id_token,
+                        "account_id": account_id or existing_account.account_id,
+                        "status": status,
+                        "source": "import"
+                    }
+                    if expires_at:
+                        update_data["expires_at"] = expires_at
+                    if last_refresh:
+                        update_data["last_refresh"] = last_refresh
+                        
+                    crud.update_account(db, existing_account.id, **update_data)
+                    updated_count += 1
+                else:
+                    # Create new account
+                    crud.create_account(
+                        db=db,
+                        email=email,
+                        email_service=email_service,
+                        account_id=account_id,
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                        id_token=id_token,
+                        expires_at=expires_at,
+                        status=status,
+                        source="import"
+                    )
+                    imported_count += 1
+            except Exception as e:
+                import traceback
+                logger.error(f"导入 [{acc_data.get('email', '未知')}] 失败: {e}\n{traceback.format_exc()}")
+                errors.append(f"导入 [{acc_data.get('email', '未知')}] 失败: {str(e)}")
+
+    return {
+        "success": True,
+        "imported_count": imported_count,
+        "updated_count": updated_count,
+        "errors": errors if errors else None
+    }
+
+
 @router.get("/stats/summary")
 async def get_accounts_stats():
     """获取账号统计信息"""
@@ -614,17 +732,46 @@ async def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: B
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    for account_id in ids:
-        try:
-            result = do_refresh(account_id, proxy)
-            if result.success:
-                results["success_count"] += 1
-            else:
-                results["failed_count"] += 1
-                results["errors"].append({"id": account_id, "error": result.error_message})
-        except Exception as e:
-            results["failed_count"] += 1
-            results["errors"].append({"id": account_id, "error": str(e)})
+    total = len(ids)
+    if total > 0:
+        logger.info(f"开始批量刷新 {total} 个账号...")
+
+    processed = 0
+    cancel_batch_flag.clear()
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_id = {executor.submit(do_refresh, account_id, proxy): account_id for account_id in ids}
+        pending = set(future_to_id.keys())
+        
+        while pending:
+            if cancel_batch_flag.is_set():
+                logger.warning("接收到手动终止指令，剩余刷新任务将被取消...")
+                for future in pending:
+                    future.cancel()
+                    results["failed_count"] += 1
+                    results["errors"].append({"id": future_to_id[future], "error": "操作被手动终止"})
+                break
+                
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            
+            for future in done:
+                account_id = future_to_id[future]
+                processed += 1
+                try:
+                    result = future.result()
+                    if result.success:
+                        results["success_count"] += 1
+                    else:
+                        results["failed_count"] += 1
+                        results["errors"].append({"id": account_id, "error": result.error_message})
+                except Exception as e:
+                    results["failed_count"] += 1
+                    results["errors"].append({"id": account_id, "error": str(e)})
+
+                if processed % 10 == 0 or processed == total:
+                    logger.info(f"批量刷新进度: {processed}/{total}")
+
+    if total > 0:
+        logger.info(f"批量刷新完成！成功: {results['success_count']}, 失败: {results['failed_count']}")
 
     return results
 
@@ -665,25 +812,58 @@ async def batch_validate_tokens(request: BatchValidateRequest):
             request.status_filter, request.email_service_filter, request.search_filter
         )
 
-    for account_id in ids:
-        try:
-            is_valid, error = do_validate(account_id, proxy)
-            results["details"].append({
-                "id": account_id,
-                "valid": is_valid,
-                "error": error
-            })
-            if is_valid:
-                results["valid_count"] += 1
-            else:
-                results["invalid_count"] += 1
-        except Exception as e:
-            results["invalid_count"] += 1
-            results["details"].append({
-                "id": account_id,
-                "valid": False,
-                "error": str(e)
-            })
+    total = len(ids)
+    if total > 0:
+        logger.info(f"开始批量验证 {total} 个账号...")
+
+    processed = 0
+    cancel_batch_flag.clear()
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_id = {executor.submit(do_validate, account_id, proxy): account_id for account_id in ids}
+        pending = set(future_to_id.keys())
+        
+        while pending:
+            if cancel_batch_flag.is_set():
+                logger.warning("接收到手动终止指令，剩余验证任务将被取消...")
+                for future in pending:
+                    future.cancel()
+                    results["invalid_count"] += 1
+                    results["details"].append({
+                        "id": future_to_id[future],
+                        "valid": False,
+                        "error": "操作被手动终止"
+                    })
+                break
+                
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            
+            for future in done:
+                account_id = future_to_id[future]
+                processed += 1
+                try:
+                    is_valid, error = future.result()
+                    results["details"].append({
+                        "id": account_id,
+                        "valid": is_valid,
+                        "error": error
+                    })
+                    if is_valid:
+                        results["valid_count"] += 1
+                    else:
+                        results["invalid_count"] += 1
+                except Exception as e:
+                    results["invalid_count"] += 1
+                    results["details"].append({
+                        "id": account_id,
+                        "valid": False,
+                        "error": str(e)
+                    })
+
+                if processed % 10 == 0 or processed == total:
+                    logger.info(f"批量验证进度: {processed}/{total}")
+
+    if total > 0:
+        logger.info(f"批量验证完成！有效: {results['valid_count']}, 无效: {results['invalid_count']}")
 
     return results
 

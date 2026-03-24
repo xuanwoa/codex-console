@@ -10,7 +10,7 @@ let totalAccounts = 0;
 let selectedAccounts = new Set();
 let isLoading = false;
 let selectAllPages = false;  // 是否选中了全部页
-let currentFilters = { status: '', email_service: '', search: '' };  // 当前筛选条件
+let currentFilters = { status: '', email_service: '', source: '', search: '' };  // 当前筛选条件
 
 // DOM 元素
 const elements = {
@@ -21,13 +21,17 @@ const elements = {
     failedAccounts: document.getElementById('failed-accounts'),
     filterStatus: document.getElementById('filter-status'),
     filterService: document.getElementById('filter-service'),
+    filterSource: document.getElementById('filter-source'),
     searchInput: document.getElementById('search-input'),
     refreshBtn: document.getElementById('refresh-btn'),
     batchRefreshBtn: document.getElementById('batch-refresh-btn'),
     batchValidateBtn: document.getElementById('batch-validate-btn'),
+    cancelBatchBtn: document.getElementById('cancel-batch-btn'),
     batchUploadBtn: document.getElementById('batch-upload-btn'),
     batchCheckSubBtn: document.getElementById('batch-check-sub-btn'),
     batchDeleteBtn: document.getElementById('batch-delete-btn'),
+    importBtn: document.getElementById('import-btn'),
+    importDirInput: document.getElementById('import-dir-input'),
     exportBtn: document.getElementById('export-btn'),
     exportMenu: document.getElementById('export-menu'),
     selectAll: document.getElementById('select-all'),
@@ -62,6 +66,14 @@ function initEventListeners() {
         resetSelectAllPages();
         loadAccounts();
     });
+
+    if (elements.filterSource) {
+        elements.filterSource.addEventListener('change', () => {
+            currentPage = 1;
+            resetSelectAllPages();
+            loadAccounts();
+        });
+    }
 
     // 搜索（防抖）
     elements.searchInput.addEventListener('input', debounce(() => {
@@ -108,6 +120,30 @@ function initEventListeners() {
 
     // 批量删除
     elements.batchDeleteBtn.addEventListener('click', handleBatchDelete);
+
+    // 批量导入
+    if (elements.importBtn && elements.importDirInput) {
+        elements.importBtn.addEventListener('click', () => {
+            elements.importDirInput.click();
+        });
+        elements.importDirInput.addEventListener('change', handleBatchImport);
+    }
+
+// 处理终止批量操作
+async function handleCancelBatch() {
+    try {
+        elements.cancelBatchBtn.disabled = true;
+        elements.cancelBatchBtn.textContent = '⏹️ 正在终止...';
+        await api.post('/accounts/batch-cancel');
+        toast.info('已下发终止指令，在此后的排队任务都会中止');
+    } catch (e) {
+        toast.error('发送终止请求失败: ' + e.message);
+        elements.cancelBatchBtn.disabled = false;
+        elements.cancelBatchBtn.textContent = '⏹️ 终止任务';
+    }
+}
+
+elements.cancelBatchBtn.addEventListener('click', handleCancelBatch);
 
     // 全选（当前页）
     elements.selectAll.addEventListener('change', (e) => {
@@ -223,6 +259,7 @@ async function loadAccounts() {
     // 记录当前筛选条件
     currentFilters.status = elements.filterStatus.value;
     currentFilters.email_service = elements.filterService.value;
+    currentFilters.source = elements.filterSource ? elements.filterSource.value : '';
     currentFilters.search = elements.searchInput.value.trim();
 
     const params = new URLSearchParams({
@@ -236,6 +273,10 @@ async function loadAccounts() {
 
     if (currentFilters.email_service) {
         params.append('email_service', currentFilters.email_service);
+    }
+
+    if (currentFilters.source) {
+        params.append('source', currentFilters.source);
     }
 
     if (currentFilters.search) {
@@ -304,6 +345,7 @@ function renderAccounts(accounts) {
                     : '-'}
             </td>
             <td>${getServiceTypeText(account.email_service)}</td>
+            <td>${getAccountSource(account.source)}</td>
             <td>${getStatusIcon(account.status)}</td>
             <td>
                 <div class="cpa-status">
@@ -513,15 +555,32 @@ async function handleBatchRefresh() {
 
     elements.batchRefreshBtn.disabled = true;
     elements.batchRefreshBtn.textContent = '刷新中...';
+    elements.cancelBatchBtn.style.display = 'inline-block';
+    elements.cancelBatchBtn.disabled = false;
+    elements.cancelBatchBtn.textContent = '⏹️ 终止任务';
 
     try {
         const result = await api.post('/accounts/batch-refresh', buildBatchPayload());
-        toast.success(`成功刷新 ${result.success_count} 个，失败 ${result.failed_count} 个`);
+        let msg = `成功刷新 ${result.success_count} 个，失败 ${result.failed_count} 个`;
+        if (result.failed_count > 0 && result.errors) {
+            const errorTypes = {};
+            result.errors.forEach(e => {
+                const errName = e.error || '未知错误';
+                errorTypes[errName] = (errorTypes[errName] || 0) + 1;
+            });
+            const errorStrs = Object.entries(errorTypes).map(([m, c]) => `${m}(${c}个)`).join('; ');
+            msg += ` ❎ 原因: ${errorStrs}`;
+            toast.warning(msg);
+        } else {
+            toast.success(msg);
+        }
         loadAccounts();
     } catch (error) {
         toast.error('批量刷新失败: ' + error.message);
     } finally {
         updateBatchButtons();
+        elements.cancelBatchBtn.style.display = 'none';
+        elements.cancelBatchBtn.textContent = '⏹️ 终止任务';
     }
 }
 
@@ -531,15 +590,32 @@ async function handleBatchValidate() {
 
     elements.batchValidateBtn.disabled = true;
     elements.batchValidateBtn.textContent = '验证中...';
+    elements.cancelBatchBtn.style.display = 'inline-block';
+    elements.cancelBatchBtn.disabled = false;
+    elements.cancelBatchBtn.textContent = '⏹️ 终止任务';
 
     try {
         const result = await api.post('/accounts/batch-validate', buildBatchPayload());
-        toast.info(`有效: ${result.valid_count}，无效: ${result.invalid_count}`);
+        let msg = `有效: ${result.valid_count}，无效: ${result.invalid_count}`;
+        if (result.invalid_count > 0 && result.details) {
+            const errorTypes = {};
+            result.details.filter(d => !d.valid).forEach(d => {
+                const errName = d.error || '未知错误';
+                errorTypes[errName] = (errorTypes[errName] || 0) + 1;
+            });
+            const errorStrs = Object.entries(errorTypes).map(([m, c]) => `${m}(${c}个)`).join('; ');
+            msg += ` ❎ 原因: ${errorStrs}`;
+            toast.warning(msg);
+        } else {
+            toast.info(msg);
+        }
         loadAccounts();
     } catch (error) {
         toast.error('批量验证失败: ' + error.message);
     } finally {
         updateBatchButtons();
+        elements.cancelBatchBtn.style.display = 'none';
+        elements.cancelBatchBtn.textContent = '⏹️ 终止任务';
     }
 }
 
@@ -738,6 +814,96 @@ async function exportAccounts(format) {
         console.error('导出失败:', error);
         toast.error('导出失败: ' + error.message);
     }
+}
+
+// 批量导入处理
+async function handleBatchImport(event) {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    // 筛选出 json 文件
+    const jsonFiles = Array.from(files).filter(f => f.name.endsWith('.json'));
+    if (jsonFiles.length === 0) {
+        toast.warning('未找到有效的 JSON 文件');
+        event.target.value = ''; // 重置 input
+        return;
+    }
+
+    const orgTextBtn = elements.importBtn.innerHTML;
+    elements.importBtn.disabled = true;
+    elements.importBtn.innerHTML = '⏳ 解析中...';
+
+    try {
+        const accountsData = [];
+        let parseErrors = 0;
+
+        // 并行读取所有文件
+        const readPromises = jsonFiles.map(file => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        accountsData.push(data);
+                    } catch (err) {
+                        parseErrors++;
+                        console.error(`解析文件失败: ${file.name}`, err);
+                    }
+                    resolve();
+                };
+                reader.onerror = () => {
+                    parseErrors++;
+                    resolve();
+                };
+                reader.readAsText(file);
+            });
+        });
+
+        await Promise.all(readPromises);
+
+        if (accountsData.length === 0) {
+            toast.error('没有成功解析出任何账号数据');
+            return;
+        }
+
+        if (parseErrors > 0) {
+            toast.warning(`有 ${parseErrors} 个文件解析失败，已跳过`);
+        }
+
+        elements.importBtn.innerHTML = '☁️ 上传中...';
+
+        // 提交到后端
+        const response = await api.post('/accounts/import/json', {
+            accounts: accountsData
+        });
+
+        if (response.success) {
+            let msg = `导入 ${response.imported_count}个，更新 ${response.updated_count}个账号。`;
+            if (response.errors && response.errors.length > 0) {
+                msg += ` (失败: ${response.errors.length}个)`;
+            }
+            toast.success(msg);
+            loadStats();
+            loadAccounts();
+        } else {
+            toast.error('导入处理失败');
+        }
+
+    } catch (error) {
+        console.error('批量导入发生错误:', error);
+        toast.error('批量导入错误: ' + error.message);
+    } finally {
+        elements.importBtn.disabled = false;
+        elements.importBtn.innerHTML = orgTextBtn;
+        event.target.value = ''; // 重置 input
+    }
+}
+
+// 获取来源文本
+function getAccountSource(source) {
+    if (!source || source === 'register') return '<span class="badge" style="background:var(--primary-light);color:var(--primary-color)">注册</span>';
+    if (source === 'import') return '<span class="badge" style="background:var(--success-color);color:#fff">导入</span>';
+    return `<span class="badge" style="background:var(--border-color);color:var(--text-secondary)">${escapeHtml(source)}</span>`;
 }
 
 // HTML 转义

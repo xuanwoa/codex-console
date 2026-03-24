@@ -112,6 +112,12 @@
                             <option value="moe_mail">MoeMail</option>
                         </select>
 
+                        <select id="filter-source" class="form-select">
+                            <option value="">全部来源</option>
+                            <option value="register">注册 (register)</option>
+                            <option value="import">导入 (import)</option>
+                        </select>
+
                         <input type="text" id="search-input" class="form-input" placeholder="🔍 搜索邮箱..." style="min-width: 200px;">
                     </div>
 
@@ -124,6 +130,9 @@
                         </button>
                         <button class="btn btn-info" id="batch-validate-btn" disabled title="批量验证Token">
                             ✅ 验证Token
+                        </button>
+                        <button class="btn btn-danger" id="cancel-batch-btn" style="display: none;" title="终止正在进行的批量操作">
+                            ⏹️ 终止任务
                         </button>
                         <button class="btn btn-info" id="batch-check-sub-btn" disabled title="批量检测订阅状态">
                             🔍 检测订阅
@@ -152,6 +161,10 @@
                                 <a href="#" class="dropdown-item" data-format="sub2api">导出 Sub2Api 格式</a>
                             </div>
                         </div>
+                        <button class="btn btn-success" id="import-btn" title="选择包含 JSON 文件的目录并导入">
+                            📥 批量导入
+                        </button>
+                        <input type="file" id="import-dir-input" webkitdirectory directory multiple accept=".json" style="display: none;">
                     </div>
                 </div>
             </div>
@@ -168,6 +181,7 @@
                                     <th>邮箱</th>
                                     <th style="width: 100px;">密码</th>
                                     <th style="width: 120px;">邮箱服务</th>
+                                    <th style="width: 80px;">来源</th>
                                     <th style="width: 80px;">状态</th>
                                     <th style="width: 80px;">CPA</th>
                                     <th style="width: 80px;">订阅</th>

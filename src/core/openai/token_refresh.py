@@ -6,6 +6,7 @@ Token 刷新模块
 import logging
 import json
 import time
+import threading
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -19,6 +20,8 @@ from ...database.models import Account
 
 logger = logging.getLogger(__name__)
 
+# 定义全局锁，保护 SQLite 的并发写入
+db_write_lock = threading.Lock()
 
 @dataclass
 class TokenRefreshResult:
@@ -295,7 +298,8 @@ def refresh_account_token(account_id: int, proxy_url: Optional[str] = None) -> T
             # 更新数据库
             update_data = {
                 "access_token": result.access_token,
-                "last_refresh": datetime.utcnow()
+                "last_refresh": datetime.utcnow(),
+                "status": "active"
             }
 
             if result.refresh_token:
@@ -304,7 +308,17 @@ def refresh_account_token(account_id: int, proxy_url: Optional[str] = None) -> T
             if result.expires_at:
                 update_data["expires_at"] = result.expires_at
 
-            crud.update_account(db, account_id, **update_data)
+            with db_write_lock:
+                crud.update_account(db, account_id, **update_data)
+        else:
+            # 如果刷新失败，记录状态 (考虑可能是封禁或失效)
+            status = "failed"
+            if result.error_message and ("未找到 access_token" in result.error_message or "Account deactivated" in result.error_message):
+                status = "expired"
+            elif result.error_message and ("403" in result.error_message or "401" in result.error_message):
+                status = "banned"
+            with db_write_lock:
+                crud.update_account(db, account_id, status=status)
 
         return result
 
@@ -329,4 +343,18 @@ def validate_account_token(account_id: int, proxy_url: Optional[str] = None) -> 
             return False, "账号没有 access_token"
 
         manager = TokenRefreshManager(proxy_url=proxy_url)
-        return manager.validate_token(account.access_token)
+        is_valid, error = manager.validate_token(account.access_token)
+
+        # 更新数据库状态
+        with db_write_lock:
+            if is_valid:
+                crud.update_account(db, account_id, status="active")
+            else:
+                status = "failed"
+                if error == "Token 无效或已过期":
+                    status = "expired"
+                elif error == "账号可能被封禁":
+                    status = "banned"
+                crud.update_account(db, account_id, status=status)
+
+        return is_valid, error

@@ -372,16 +372,16 @@ function getServiceTypeText(type) {
 }
 
 const accountStatusIconMap = {
-    active:  { icon: '🟢', title: '活跃' },
-    expired: { icon: '🟡', title: '过期' },
-    banned:  { icon: '🔴', title: '封禁' },
-    failed:  { icon: '❌', title: '失败' },
+    active:  { icon: '🟢', title: '正常', bg: 'var(--success-color)' },
+    expired: { icon: '🟡', title: '过期', bg: 'var(--warning-color)' },
+    banned:  { icon: '🔴', title: '封禁', bg: '#343a40' },
+    failed:  { icon: '❌', title: '失败', bg: '#dc3545' },
 };
 
 function getStatusIcon(status) {
     const s = accountStatusIconMap[status];
-    if (!s) return `<span title="${status}">⚪</span>`;
-    return `<span title="${s.title}">${s.icon}</span>`;
+    if (!s) return `<span class="badge" style="background:var(--text-disabled);color:#fff" title="未知">⚪ 未知</span>`;
+    return `<span class="badge" style="background:${s.bg};color:#fff" title="${s.title}">${s.icon} ${s.title}</span>`;
 }
 
 // ============================================
